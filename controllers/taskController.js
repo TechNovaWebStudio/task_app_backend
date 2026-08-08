@@ -21,9 +21,23 @@ const buildFilter = (query, userId) => {
   }
 
   if (query.dateFrom || query.dateTo) {
-    filter.dueDate = {};
-    if (query.dateFrom) filter.dueDate.$gte = new Date(query.dateFrom);
-    if (query.dateTo) filter.dueDate.$lte = new Date(query.dateTo);
+    const dueDateCond = {};
+    const datesCond = {};
+    if (query.dateFrom) {
+      dueDateCond.$gte = new Date(query.dateFrom);
+      datesCond.$gte = query.dateFrom;
+    }
+    if (query.dateTo) {
+      dueDateCond.$lte = new Date(query.dateTo);
+      datesCond.$lte = query.dateTo;
+    }
+    const cond = { $or: [{ dueDate: dueDateCond }, { dates: datesCond }] };
+    if (filter.$or) {
+      filter.$and = [{ $or: filter.$or }, cond];
+      delete filter.$or;
+    } else {
+      filter.$or = cond.$or;
+    }
   }
 
   if (query.month && query.year) {
@@ -39,7 +53,22 @@ const buildFilter = (query, userId) => {
     const d = new Date(query.date);
     const next = new Date(d);
     next.setDate(next.getDate() + 1);
-    filter.dueDate = { $gte: d, $lt: next };
+    const cond = {
+      $or: [
+        { dueDate: { $gte: d, $lt: next } },
+        { dates: query.date }
+      ]
+    };
+    if (filter.$or) {
+      if (!filter.$and) filter.$and = [];
+      filter.$and.push({ $or: filter.$or });
+      filter.$and.push(cond);
+      delete filter.$or;
+    } else if (filter.$and) {
+      filter.$and.push(cond);
+    } else {
+      filter.$or = cond.$or;
+    }
   }
 
   return filter;
@@ -129,12 +158,26 @@ const deleteTask = async (req, res, next) => {
 // PATCH /api/tasks/:id/complete
 const completeTask = async (req, res, next) => {
   try {
-    const task = await Task.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user._id },
-      { status: 'completed', completedAt: new Date() },
-      { new: true }
-    );
+    const { date } = req.body;
+    const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
+
+    if (date && task.dates && task.dates.includes(date)) {
+      if (!task.completedDates.includes(date)) {
+        task.completedDates.push(date);
+      }
+      if (task.dates.every(d => task.completedDates.includes(d))) {
+        task.status = 'completed';
+        task.completedAt = new Date();
+      }
+    } else {
+      task.status = 'completed';
+      task.completedAt = new Date();
+      if (task.dates && task.dates.length > 0) {
+         task.completedDates = [...task.dates];
+      }
+    }
+    await task.save();
 
     await logActivity({ userId: req.user._id, action: 'TASK_COMPLETED', description: `Completed task: ${task.title}`, taskId: task._id, req });
     await createNotification({ userId: req.user._id, title: 'Task Completed! 🎉', message: `You completed "${task.title}"`, type: 'success', taskId: task._id });
@@ -148,12 +191,20 @@ const completeTask = async (req, res, next) => {
 // PATCH /api/tasks/:id/pending
 const pendingTask = async (req, res, next) => {
   try {
-    const task = await Task.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user._id },
-      { status: 'pending', completedAt: null },
-      { new: true }
-    );
+    const { date } = req.body;
+    const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
+
+    if (date && task.completedDates && task.completedDates.includes(date)) {
+      task.completedDates = task.completedDates.filter(d => d !== date);
+      task.status = 'pending';
+      task.completedAt = null;
+    } else {
+      task.status = 'pending';
+      task.completedAt = null;
+      task.completedDates = [];
+    }
+    await task.save();
     return successResponse(res, { message: 'Task marked as pending', data: task });
   } catch (error) {
     next(error);

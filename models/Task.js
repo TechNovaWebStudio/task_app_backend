@@ -17,6 +17,8 @@ const taskSchema = new mongoose.Schema(
     },
     dueDate: { type: Date },
     dueTime: { type: String, default: '' },
+    dates: [{ type: String }],
+    completedDates: [{ type: String }],
     reminder: { type: Date },
     estimatedDuration: { type: Number, default: 0 }, // minutes
     actualDuration: { type: Number, default: 0 }, // minutes
