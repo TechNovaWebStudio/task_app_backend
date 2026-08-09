@@ -3,7 +3,7 @@ const { successResponse, errorResponse } = require('../utils/apiResponse');
 const { getPagination, buildMeta } = require('../utils/pagination');
 const { logActivity, createNotification } = require('../services/notificationService');
 
-const ALLOWED_SORT_FIELDS = ['createdAt', 'updatedAt', 'dueDate', 'priority', 'status', 'title'];
+const ALLOWED_SORT_FIELDS = ['createdAt', 'updatedAt', 'dueDate', 'dueTime', 'priority', 'status', 'title'];
 
 const buildFilter = (query, userId) => {
   const filter = { userId, isArchived: false };
@@ -108,10 +108,28 @@ const getTask = async (req, res, next) => {
   }
 };
 
+// Normalization helper for dates and tags
+const normalizeTaskData = (data) => {
+  const result = { ...data };
+  if (result.dates && Array.isArray(result.dates)) {
+    result.dates = [...new Set(result.dates)].sort();
+  } else if (result.dueDate && (!result.dates || result.dates.length === 0)) {
+    const d = new Date(result.dueDate);
+    if (!isNaN(d)) {
+      result.dates = [d.toISOString().split('T')[0]];
+    }
+  }
+  if (result.tags && Array.isArray(result.tags)) {
+    result.tags = [...new Set(result.tags.map(t => t.trim()).filter(t => t))];
+  }
+  return result;
+};
+
 // POST /api/tasks
 const createTask = async (req, res, next) => {
   try {
-    const task = await Task.create({ ...req.body, userId: req.user._id });
+    const taskData = normalizeTaskData(req.body);
+    const task = await Task.create({ ...taskData, userId: req.user._id });
 
     await logActivity({ userId: req.user._id, action: 'TASK_CREATED', description: `Created task: ${task.title}`, taskId: task._id, req });
     await createNotification({ userId: req.user._id, title: 'Task Created', message: `Task "${task.title}" has been created`, type: 'task', taskId: task._id });
@@ -125,9 +143,10 @@ const createTask = async (req, res, next) => {
 // PUT /api/tasks/:id
 const updateTask = async (req, res, next) => {
   try {
+    const taskData = normalizeTaskData(req.body);
     const task = await Task.findOneAndUpdate(
       { _id: req.params.id, userId: req.user._id },
-      { ...req.body },
+      { ...taskData },
       { new: true, runValidators: true }
     );
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
