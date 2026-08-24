@@ -19,6 +19,7 @@ const taskSchema = new mongoose.Schema(
     dueTime: { type: String, default: '' },
     dates: [{ 
       date: { type: String, required: true },
+      time: { type: String, default: '' },
       completed: { type: Boolean, default: false }
     }],
     reminder: { type: Date },

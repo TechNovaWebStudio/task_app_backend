@@ -82,11 +82,23 @@ const normalizeTaskData = (data, existingTask = null) => {
   const result = { ...data };
   
   if (result.dates && Array.isArray(result.dates)) {
-    // Remove duplicates and sort string dates, then map to objects
-    const uniqueDates = [...new Set(result.dates.filter(d => typeof d === 'string'))].sort();
+    const uniqueDatesMap = new Map();
     
-    result.dates = uniqueDates.map(dateStr => {
+    result.dates.forEach(d => {
+      const dateStr = typeof d === 'string' ? d : d.date;
+      const timeStr = typeof d === 'object' && d.time ? d.time : '';
+      
+      if (dateStr && !uniqueDatesMap.has(dateStr)) {
+        uniqueDatesMap.set(dateStr, timeStr);
+      }
+    });
+
+    const sortedDates = Array.from(uniqueDatesMap.keys()).sort();
+    
+    result.dates = sortedDates.map(dateStr => {
       let completed = false;
+      const timeStr = uniqueDatesMap.get(dateStr);
+
       if (existingTask && existingTask.dates) {
         // Preserve completion status if date already existed
         const existingDateObj = existingTask.dates.find(d => 
@@ -98,7 +110,7 @@ const normalizeTaskData = (data, existingTask = null) => {
           completed = true;
         }
       }
-      return { date: dateStr, completed };
+      return { date: dateStr, time: timeStr, completed };
     });
   } else if (result.dueDate && (!result.dates || result.dates.length === 0)) {
     const d = new Date(result.dueDate);
@@ -172,12 +184,21 @@ const completeTask = async (req, res, next) => {
     const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
 
+    const todayStr = new Date().toISOString().split('T')[0];
+
     if (date && task.dates && task.dates.length > 0) {
+      if (date > todayStr) {
+        return errorResponse(res, { message: 'Cannot complete a task scheduled for a future date', statusCode: 400 });
+      }
       const dateObj = task.dates.find(d => d.date === date);
       if (dateObj) {
         dateObj.completed = true;
       }
     } else if (task.dates && task.dates.length > 0) {
+      const hasFutureDates = task.dates.some(d => d.date > todayStr);
+      if (hasFutureDates) {
+        return errorResponse(res, { message: 'Cannot complete a task with future occurrences', statusCode: 400 });
+      }
       task.dates.forEach(d => { d.completed = true; });
     }
     
@@ -201,12 +222,21 @@ const pendingTask = async (req, res, next) => {
     const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
 
+    const todayStr = new Date().toISOString().split('T')[0];
+
     if (date && task.dates && task.dates.length > 0) {
+      if (date > todayStr) {
+        return errorResponse(res, { message: 'Cannot modify a task scheduled for a future date', statusCode: 400 });
+      }
       const dateObj = task.dates.find(d => d.date === date);
       if (dateObj) {
         dateObj.completed = false;
       }
     } else if (task.dates && task.dates.length > 0) {
+      const hasFutureDates = task.dates.some(d => d.date > todayStr);
+      if (hasFutureDates) {
+        return errorResponse(res, { message: 'Cannot modify a task with future occurrences', statusCode: 400 });
+      }
       task.dates.forEach(d => { d.completed = false; });
     }
     
