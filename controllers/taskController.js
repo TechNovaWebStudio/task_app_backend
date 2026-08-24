@@ -8,67 +8,36 @@ const ALLOWED_SORT_FIELDS = ['createdAt', 'updatedAt', 'dueDate', 'dueTime', 'pr
 const buildFilter = (query, userId) => {
   const filter = { userId, isArchived: false };
 
-  if (query.status) filter.status = query.status;
-  if (query.priority) filter.priority = query.priority;
-  if (query.category) filter.category = new RegExp(query.category, 'i');
-
   if (query.search) {
     filter.$or = [
       { title: new RegExp(query.search, 'i') },
       { description: new RegExp(query.search, 'i') },
-      { category: new RegExp(query.search, 'i') },
+      { tags: new RegExp(query.search, 'i') }
     ];
   }
 
+  // Handle Date and Status via dates array
+  let dateCond = null;
+  let statusCond = null;
+
   if (query.dateFrom || query.dateTo) {
-    const dueDateCond = {};
-    const datesCond = {};
-    if (query.dateFrom) {
-      dueDateCond.$gte = new Date(query.dateFrom);
-      datesCond.$gte = query.dateFrom;
-    }
-    if (query.dateTo) {
-      dueDateCond.$lte = new Date(query.dateTo);
-      datesCond.$lte = query.dateTo;
-    }
-    const cond = { $or: [{ dueDate: dueDateCond }, { 'dates.date': datesCond }] };
-    if (filter.$or) {
-      filter.$and = [{ $or: filter.$or }, cond];
-      delete filter.$or;
-    } else {
-      filter.$or = cond.$or;
-    }
+    dateCond = {};
+    if (query.dateFrom) dateCond.$gte = query.dateFrom;
+    if (query.dateTo) dateCond.$lte = query.dateTo;
+  } else if (query.date) {
+    dateCond = query.date;
   }
 
-  if (query.month && query.year) {
-    const m = parseInt(query.month, 10) - 1;
-    const y = parseInt(query.year, 10);
-    filter.dueDate = {
-      $gte: new Date(y, m, 1),
-      $lte: new Date(y, m + 1, 0, 23, 59, 59),
-    };
+  if (query.status === 'completed' || query.status === 'non_completed') {
+    statusCond = query.status === 'completed';
   }
 
-  if (query.date) {
-    const d = new Date(query.date);
-    const next = new Date(d);
-    next.setDate(next.getDate() + 1);
-    const cond = {
-      $or: [
-        { dueDate: { $gte: d, $lt: next } },
-        { 'dates.date': query.date }
-      ]
-    };
-    if (filter.$or) {
-      if (!filter.$and) filter.$and = [];
-      filter.$and.push({ $or: filter.$or });
-      filter.$and.push(cond);
-      delete filter.$or;
-    } else if (filter.$and) {
-      filter.$and.push(cond);
-    } else {
-      filter.$or = cond.$or;
-    }
+  if (dateCond && statusCond !== null) {
+    filter.dates = { $elemMatch: { date: dateCond, completed: statusCond } };
+  } else if (dateCond) {
+    filter.dates = { $elemMatch: { date: dateCond } };
+  } else if (statusCond !== null) {
+    filter.dates = { $elemMatch: { completed: statusCond } };
   }
 
   return filter;
@@ -208,22 +177,17 @@ const completeTask = async (req, res, next) => {
       if (dateObj) {
         dateObj.completed = true;
       }
-      if (task.dates.every(d => d.completed)) {
-        task.status = 'completed';
-        task.completedAt = new Date();
-      }
-    } else {
+    } else if (task.dates && task.dates.length > 0) {
+      task.dates.forEach(d => { d.completed = true; });
+    }
+    
+    if (task.dates && task.dates.every(d => d.completed)) {
       task.status = 'completed';
       task.completedAt = new Date();
-      if (task.dates && task.dates.length > 0) {
-         task.dates.forEach(d => { d.completed = true; });
-      }
     }
     await task.save();
 
     await logActivity({ userId: req.user._id, action: 'TASK_COMPLETED', description: `Completed task: ${task.title}`, taskId: task._id, req });
-    await createNotification({ userId: req.user._id, title: 'Task Completed! 🎉', message: `You completed "${task.title}"`, type: 'success', taskId: task._id });
-
     return successResponse(res, { message: 'Task marked as completed', data: task });
   } catch (error) {
     next(error);
@@ -242,16 +206,14 @@ const pendingTask = async (req, res, next) => {
       if (dateObj) {
         dateObj.completed = false;
       }
-      task.status = 'pending';
-      task.completedAt = null;
-    } else {
-      task.status = 'pending';
-      task.completedAt = null;
-      if (task.dates && task.dates.length > 0) {
-         task.dates.forEach(d => { d.completed = false; });
-      }
+    } else if (task.dates && task.dates.length > 0) {
+      task.dates.forEach(d => { d.completed = false; });
     }
+    
+    task.status = 'non_completed';
+    task.completedAt = null;
     await task.save();
+    
     return successResponse(res, { message: 'Task marked as pending', data: task });
   } catch (error) {
     next(error);

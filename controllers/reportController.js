@@ -1,113 +1,127 @@
 const Task = require('../models/Task');
 const { successResponse } = require('../utils/apiResponse');
-const { getPagination, buildMeta } = require('../utils/pagination');
+
+// Helper to format date as YYYY-MM-DD
+const formatDate = (date) => {
+  const d = new Date(date);
+  const month = '' + (d.getMonth() + 1);
+  const day = '' + d.getDate();
+  const year = d.getFullYear();
+  return [year, month.padStart(2, '0'), day.padStart(2, '0')].join('-');
+};
 
 // GET /api/reports
 const getReports = async (req, res, next) => {
   try {
     const userId = req.user._id;
-    const { period = 'monthly', startDate, endDate, page, limit } = req.query;
-    const { skip } = getPagination(req.query);
-    const lim = Math.min(100, parseInt(limit, 10) || 10);
+    const { period = 'today', startDate, endDate } = req.query;
 
-    let start, end;
+    let startStr, endStr;
     const now = new Date();
 
-    if (startDate && endDate) {
-      start = new Date(startDate);
-      end = new Date(endDate);
-    } else if (period === 'daily') {
-      start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
-    } else if (period === 'weekly') {
+    if (period === 'custom' && startDate && endDate) {
+      startStr = startDate;
+      endStr = endDate;
+    } else if (period === 'today') {
+      startStr = formatDate(now);
+      endStr = formatDate(now);
+    } else if (period === 'yesterday') {
+      const yesterday = new Date(now);
+      yesterday.setDate(now.getDate() - 1);
+      startStr = formatDate(yesterday);
+      endStr = formatDate(yesterday);
+    } else if (period === 'this_week') {
       const day = now.getDay();
-      start = new Date(now);
-      start.setDate(now.getDate() - day);
-      start.setHours(0, 0, 0, 0);
-      end = new Date(start);
-      end.setDate(start.getDate() + 7);
-    } else if (period === 'yearly') {
-      start = new Date(now.getFullYear(), 0, 1);
-      end = new Date(now.getFullYear() + 1, 0, 1);
+      const diff = now.getDate() - day + (day === 0 ? -6 : 1); // Monday as start of week
+      const startOfWeek = new Date(now);
+      startOfWeek.setDate(diff);
+      startStr = formatDate(startOfWeek);
+      endStr = formatDate(now); // to current day
+    } else if (period === 'last_week') {
+      const day = now.getDay();
+      const diffToLastWeekStart = now.getDate() - day + (day === 0 ? -6 : 1) - 7;
+      const startOfLastWeek = new Date(now);
+      startOfLastWeek.setDate(diffToLastWeekStart);
+      const endOfLastWeek = new Date(now);
+      endOfLastWeek.setDate(diffToLastWeekStart + 6);
+      startStr = formatDate(startOfLastWeek);
+      endStr = formatDate(endOfLastWeek);
+    } else if (period === 'this_month') {
+      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      startStr = formatDate(startOfMonth);
+      // Usually you want current month up to now or end of month, let's just do end of month
+      const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      endStr = formatDate(endOfMonth);
+    } else if (period === 'last_month') {
+      const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0);
+      startStr = formatDate(startOfLastMonth);
+      endStr = formatDate(endOfLastMonth);
+    } else if (period === 'all_time') {
+      startStr = '1970-01-01';
+      endStr = '2100-01-01';
     } else {
-      // monthly (default)
-      start = new Date(now.getFullYear(), now.getMonth(), 1);
-      end = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+      // Default fallback
+      startStr = formatDate(now);
+      endStr = formatDate(now);
     }
 
-    const dateFilter = { userId, createdAt: { $gte: start, $lte: end } };
+    // Aggregation pipeline to get day-by-day stats based on dates array
+    const pipeline = [
+      { $match: { userId } },
+      { $unwind: '$dates' },
+      { $match: { 'dates.date': { $gte: startStr, $lte: endStr } } },
+      {
+        $group: {
+          _id: '$dates.date',
+          totalTasks: { $sum: 1 },
+          completedTasks: { $sum: { $cond: [{ $eq: ['$dates.completed', true] }, 1, 0] } },
+          nonCompletedTasks: { $sum: { $cond: [{ $eq: ['$dates.completed', false] }, 1, 0] } },
+        }
+      },
+      { $sort: { _id: -1 } } // newest date first
+    ];
 
-    const [
-      totalTasks,
-      completedTasks,
-      pendingTasks,
-      overdueTasks,
-      categoryBreakdown,
-      priorityBreakdown,
-      dailyTrend,
-      taskDetails,
-      totalForPagination,
-    ] = await Promise.all([
-      Task.countDocuments(dateFilter),
-      Task.countDocuments({ ...dateFilter, status: 'completed' }),
-      Task.countDocuments({ ...dateFilter, status: 'pending' }),
-      Task.countDocuments({ ...dateFilter, status: 'overdue' }),
-      Task.aggregate([
-        { $match: dateFilter },
-        { $group: { _id: '$category', total: { $sum: 1 }, completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } } } },
-        { $sort: { total: -1 } },
-      ]),
-      Task.aggregate([
-        { $match: dateFilter },
-        { $group: { _id: '$priority', total: { $sum: 1 } } },
-      ]),
-      Task.aggregate([
-        { $match: dateFilter },
-        {
-          $group: {
-            _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
-            total: { $sum: 1 },
-            completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          },
-        },
-        { $sort: { _id: 1 } },
-      ]),
-      Task.find(dateFilter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(lim)
-        .lean(),
-      Task.countDocuments(dateFilter),
-    ]);
+    const dailyData = await Task.aggregate(pipeline);
 
-    const completionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+    let totalTasks = 0;
+    let completedTasks = 0;
+    let nonCompletedTasks = 0;
 
-    // Avg completion time in minutes
-    const completedWithTime = await Task.find({
-      ...dateFilter,
-      status: 'completed',
-      completedAt: { $exists: true },
-    }).select('createdAt completedAt').lean();
+    const dailyReports = dailyData.map(day => {
+      totalTasks += day.totalTasks;
+      completedTasks += day.completedTasks;
+      nonCompletedTasks += day.nonCompletedTasks;
+      
+      const completionPercentage = day.totalTasks > 0 ? Math.round((day.completedTasks / day.totalTasks) * 100) : 0;
+      
+      return {
+        date: day._id,
+        totalTasks: day.totalTasks,
+        completedTasks: day.completedTasks,
+        nonCompletedTasks: day.nonCompletedTasks,
+        completionPercentage
+      };
+    });
 
-    let avgCompletionTime = 0;
-    if (completedWithTime.length > 0) {
-      const totalMinutes = completedWithTime.reduce((sum, t) => {
-        const diff = (new Date(t.completedAt) - new Date(t.createdAt)) / (1000 * 60);
-        return sum + diff;
-      }, 0);
-      avgCompletionTime = Math.round(totalMinutes / completedWithTime.length);
-    }
+    const completionPercentage = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+
+    // Fetch tasks that fall into this date range
+    const taskDetails = await Task.find({
+      userId,
+      'dates.date': { $gte: startStr, $lte: endStr }
+    }).sort({ createdAt: -1 }).lean();
 
     return successResponse(res, {
       data: {
-        stats: { totalTasks, completedTasks, pendingTasks, overdueTasks, completionRate, avgCompletionTime },
-        categoryBreakdown,
-        priorityBreakdown,
-        dailyTrend,
+        totalTasks,
+        completedTasks,
+        nonCompletedTasks,
+        completionPercentage,
+        dailyReports,
         taskDetails,
-        period: { start, end },
-      },
-      meta: buildMeta(totalForPagination, parseInt(page, 10) || 1, lim),
+        period: { start: startStr, end: endStr }
+      }
     });
   } catch (error) {
     next(error);
