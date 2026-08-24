@@ -31,7 +31,7 @@ const buildFilter = (query, userId) => {
       dueDateCond.$lte = new Date(query.dateTo);
       datesCond.$lte = query.dateTo;
     }
-    const cond = { $or: [{ dueDate: dueDateCond }, { dates: datesCond }] };
+    const cond = { $or: [{ dueDate: dueDateCond }, { 'dates.date': datesCond }] };
     if (filter.$or) {
       filter.$and = [{ $or: filter.$or }, cond];
       delete filter.$or;
@@ -56,7 +56,7 @@ const buildFilter = (query, userId) => {
     const cond = {
       $or: [
         { dueDate: { $gte: d, $lt: next } },
-        { dates: query.date }
+        { 'dates.date': query.date }
       ]
     };
     if (filter.$or) {
@@ -109,16 +109,35 @@ const getTask = async (req, res, next) => {
 };
 
 // Normalization helper for dates and tags
-const normalizeTaskData = (data) => {
+const normalizeTaskData = (data, existingTask = null) => {
   const result = { ...data };
+  
   if (result.dates && Array.isArray(result.dates)) {
-    result.dates = [...new Set(result.dates)].sort();
+    // Remove duplicates and sort string dates, then map to objects
+    const uniqueDates = [...new Set(result.dates.filter(d => typeof d === 'string'))].sort();
+    
+    result.dates = uniqueDates.map(dateStr => {
+      let completed = false;
+      if (existingTask && existingTask.dates) {
+        // Preserve completion status if date already existed
+        const existingDateObj = existingTask.dates.find(d => 
+          (typeof d === 'string' ? d : d.date) === dateStr
+        );
+        if (existingDateObj && existingDateObj.completed) {
+          completed = true;
+        } else if (existingTask.completedDates && existingTask.completedDates.includes(dateStr)) {
+          completed = true;
+        }
+      }
+      return { date: dateStr, completed };
+    });
   } else if (result.dueDate && (!result.dates || result.dates.length === 0)) {
     const d = new Date(result.dueDate);
     if (!isNaN(d)) {
-      result.dates = [d.toISOString().split('T')[0]];
+      result.dates = [{ date: d.toISOString().split('T')[0], completed: false }];
     }
   }
+  
   if (result.tags && Array.isArray(result.tags)) {
     result.tags = [...new Set(result.tags.map(t => t.trim()).filter(t => t))];
   }
@@ -143,7 +162,10 @@ const createTask = async (req, res, next) => {
 // PUT /api/tasks/:id
 const updateTask = async (req, res, next) => {
   try {
-    const taskData = normalizeTaskData(req.body);
+    const existingTask = await Task.findOne({ _id: req.params.id, userId: req.user._id });
+    if (!existingTask) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
+
+    const taskData = normalizeTaskData(req.body, existingTask);
     const task = await Task.findOneAndUpdate(
       { _id: req.params.id, userId: req.user._id },
       { ...taskData },
@@ -181,11 +203,12 @@ const completeTask = async (req, res, next) => {
     const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
 
-    if (date && task.dates && task.dates.includes(date)) {
-      if (!task.completedDates.includes(date)) {
-        task.completedDates.push(date);
+    if (date && task.dates && task.dates.length > 0) {
+      const dateObj = task.dates.find(d => d.date === date);
+      if (dateObj) {
+        dateObj.completed = true;
       }
-      if (task.dates.every(d => task.completedDates.includes(d))) {
+      if (task.dates.every(d => d.completed)) {
         task.status = 'completed';
         task.completedAt = new Date();
       }
@@ -193,7 +216,7 @@ const completeTask = async (req, res, next) => {
       task.status = 'completed';
       task.completedAt = new Date();
       if (task.dates && task.dates.length > 0) {
-         task.completedDates = [...task.dates];
+         task.dates.forEach(d => { d.completed = true; });
       }
     }
     await task.save();
@@ -214,14 +237,19 @@ const pendingTask = async (req, res, next) => {
     const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
 
-    if (date && task.completedDates && task.completedDates.includes(date)) {
-      task.completedDates = task.completedDates.filter(d => d !== date);
+    if (date && task.dates && task.dates.length > 0) {
+      const dateObj = task.dates.find(d => d.date === date);
+      if (dateObj) {
+        dateObj.completed = false;
+      }
       task.status = 'pending';
       task.completedAt = null;
     } else {
       task.status = 'pending';
       task.completedAt = null;
-      task.completedDates = [];
+      if (task.dates && task.dates.length > 0) {
+         task.dates.forEach(d => { d.completed = false; });
+      }
     }
     await task.save();
     return successResponse(res, { message: 'Task marked as pending', data: task });
