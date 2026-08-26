@@ -2,8 +2,17 @@ const Task = require('../models/Task');
 const { successResponse, errorResponse } = require('../utils/apiResponse');
 const { getPagination, buildMeta } = require('../utils/pagination');
 const { logActivity, createNotification } = require('../services/notificationService');
+const crypto = require('crypto');
 
-const ALLOWED_SORT_FIELDS = ['createdAt', 'updatedAt', 'dueDate', 'dueTime', 'priority', 'status', 'title'];
+const ALLOWED_SORT_FIELDS = ['createdAt', 'updatedAt', 'date', 'time', 'priority', 'status', 'title'];
+
+const getTodayString = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
 
 const buildFilter = (query, userId) => {
   const filter = { userId, isArchived: false };
@@ -16,28 +25,20 @@ const buildFilter = (query, userId) => {
     ];
   }
 
-  // Handle Date and Status via dates array
-  let dateCond = null;
-  let statusCond = null;
-
-  if (query.dateFrom || query.dateTo) {
-    dateCond = {};
-    if (query.dateFrom) dateCond.$gte = query.dateFrom;
-    if (query.dateTo) dateCond.$lte = query.dateTo;
+  if (query.month && query.year) {
+    const m = String(query.month).padStart(2, '0');
+    const y = String(query.year);
+    filter.date = new RegExp(`^${y}-${m}`);
+  } else if (query.dateFrom || query.dateTo) {
+    filter.date = {};
+    if (query.dateFrom) filter.date.$gte = query.dateFrom;
+    if (query.dateTo) filter.date.$lte = query.dateTo;
   } else if (query.date) {
-    dateCond = query.date;
+    filter.date = query.date;
   }
 
   if (query.status === 'completed' || query.status === 'non_completed') {
-    statusCond = query.status === 'completed';
-  }
-
-  if (dateCond && statusCond !== null) {
-    filter.dates = { $elemMatch: { date: dateCond, completed: statusCond } };
-  } else if (dateCond) {
-    filter.dates = { $elemMatch: { date: dateCond } };
-  } else if (statusCond !== null) {
-    filter.dates = { $elemMatch: { completed: statusCond } };
+    filter.status = query.status;
   }
 
   return filter;
@@ -77,64 +78,65 @@ const getTask = async (req, res, next) => {
   }
 };
 
-// Normalization helper for dates and tags
-const normalizeTaskData = (data, existingTask = null) => {
-  const result = { ...data };
-  
-  if (result.dates && Array.isArray(result.dates)) {
-    const uniqueDatesMap = new Map();
-    
-    result.dates.forEach(d => {
-      const dateStr = typeof d === 'string' ? d : d.date;
-      const timeStr = typeof d === 'object' && d.time ? d.time : '';
-      
-      if (dateStr && !uniqueDatesMap.has(dateStr)) {
-        uniqueDatesMap.set(dateStr, timeStr);
-      }
-    });
-
-    const sortedDates = Array.from(uniqueDatesMap.keys()).sort();
-    
-    result.dates = sortedDates.map(dateStr => {
-      let completed = false;
-      const timeStr = uniqueDatesMap.get(dateStr);
-
-      if (existingTask && existingTask.dates) {
-        // Preserve completion status if date already existed
-        const existingDateObj = existingTask.dates.find(d => 
-          (typeof d === 'string' ? d : d.date) === dateStr
-        );
-        if (existingDateObj && existingDateObj.completed) {
-          completed = true;
-        } else if (existingTask.completedDates && existingTask.completedDates.includes(dateStr)) {
-          completed = true;
-        }
-      }
-      return { date: dateStr, time: timeStr, completed };
-    });
-  } else if (result.dueDate && (!result.dates || result.dates.length === 0)) {
-    const d = new Date(result.dueDate);
-    if (!isNaN(d)) {
-      result.dates = [{ date: d.toISOString().split('T')[0], completed: false }];
-    }
+// GET /api/tasks/series/:seriesId
+const getSeries = async (req, res, next) => {
+  try {
+    const tasks = await Task.find({ seriesId: req.params.seriesId, userId: req.user._id, isArchived: false }).sort({ date: 1 }).lean();
+    return successResponse(res, { data: tasks });
+  } catch (error) {
+    next(error);
   }
-  
-  if (result.tags && Array.isArray(result.tags)) {
-    result.tags = [...new Set(result.tags.map(t => t.trim()).filter(t => t))];
-  }
-  return result;
 };
 
 // POST /api/tasks
 const createTask = async (req, res, next) => {
   try {
-    const taskData = normalizeTaskData(req.body);
-    const task = await Task.create({ ...taskData, userId: req.user._id });
+    const { title, description, category, priority, dates, tags } = req.body;
+    if (!title || !title.trim()) {
+      return errorResponse(res, { message: 'Task title is required', statusCode: 400 });
+    }
 
-    await logActivity({ userId: req.user._id, action: 'TASK_CREATED', description: `Created task: ${task.title}`, taskId: task._id, req });
-    await createNotification({ userId: req.user._id, title: 'Task Created', message: `Task "${task.title}" has been created`, type: 'task', taskId: task._id });
+    const seriesId = crypto.randomUUID();
+    
+    let rawDates = dates;
+    if (!rawDates || !Array.isArray(rawDates) || rawDates.length === 0) {
+      const todayStr = getTodayString();
+      rawDates = [{ date: req.body.dueDate || todayStr, time: req.body.dueTime || '' }];
+    }
 
-    return successResponse(res, { message: 'Task created successfully', data: task, statusCode: 201 });
+    // Filter valid & deduplicate dates (duplicate date protection)
+    const uniqueDatesMap = new Map();
+    rawDates.forEach(d => {
+      const dateStr = typeof d === 'string' ? d : d?.date;
+      const timeStr = typeof d === 'object' ? (d.time || '') : '';
+      if (dateStr && !uniqueDatesMap.has(dateStr)) {
+        uniqueDatesMap.set(dateStr, timeStr);
+      }
+    });
+
+    if (uniqueDatesMap.size === 0) {
+      return errorResponse(res, { message: 'At least one valid date must be selected', statusCode: 400 });
+    }
+
+    const documents = Array.from(uniqueDatesMap.entries()).map(([dateStr, timeStr]) => ({
+      title: title.trim(),
+      description: description || '',
+      category: category || 'Personal',
+      priority: priority || 'medium',
+      tags: Array.isArray(tags) ? tags : [],
+      date: dateStr,
+      time: timeStr,
+      seriesId,
+      userId: req.user._id,
+      status: 'non_completed'
+    }));
+
+    const createdTasks = await Task.insertMany(documents);
+
+    await logActivity({ userId: req.user._id, action: 'TASK_CREATED', description: `Created task: ${title} (${createdTasks.length} occurrence${createdTasks.length > 1 ? 's' : ''})`, taskId: createdTasks[0]._id, req });
+    await createNotification({ userId: req.user._id, title: 'Task Created', message: `Task "${title}" created for ${createdTasks.length} date(s)`, type: 'task', taskId: createdTasks[0]._id });
+
+    return successResponse(res, { message: 'Task created successfully', data: createdTasks[0], statusCode: 201 });
   } catch (error) {
     next(error);
   }
@@ -146,17 +148,71 @@ const updateTask = async (req, res, next) => {
     const existingTask = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!existingTask) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
 
-    const taskData = normalizeTaskData(req.body, existingTask);
-    const task = await Task.findOneAndUpdate(
-      { _id: req.params.id, userId: req.user._id },
-      { ...taskData },
-      { new: true, runValidators: true }
-    );
-    if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
+    const { title, description, category, priority, tags, dates } = req.body;
 
-    await logActivity({ userId: req.user._id, action: 'TASK_UPDATED', description: `Updated task: ${task.title}`, taskId: task._id, req });
+    if (dates && Array.isArray(dates) && dates.length > 0) {
+      const existingSeries = await Task.find({ seriesId: existingTask.seriesId, userId: req.user._id });
+      
+      const incomingDatesMap = new Map();
+      dates.forEach(d => {
+        const dateStr = typeof d === 'string' ? d : d?.date;
+        const timeStr = typeof d === 'object' ? (d.time || '') : '';
+        if (dateStr && !incomingDatesMap.has(dateStr)) {
+          incomingDatesMap.set(dateStr, timeStr);
+        }
+      });
+      
+      const toDelete = existingSeries.filter(t => !incomingDatesMap.has(t.date));
+      const toUpdate = existingSeries.filter(t => incomingDatesMap.has(t.date));
+      const existingDateStrings = new Set(existingSeries.map(t => t.date));
+      
+      const toCreate = Array.from(incomingDatesMap.entries())
+        .filter(([dateStr]) => !existingDateStrings.has(dateStr))
+        .map(([dateStr, timeStr]) => ({
+          title: title || existingTask.title,
+          description: description !== undefined ? description : existingTask.description,
+          category: category || existingTask.category,
+          priority: priority || existingTask.priority,
+          tags: tags !== undefined ? tags : existingTask.tags,
+          date: dateStr,
+          time: timeStr,
+          seriesId: existingTask.seriesId,
+          userId: req.user._id,
+          status: 'non_completed'
+        }));
+        
+      if (toDelete.length > 0) {
+        await Task.deleteMany({ _id: { $in: toDelete.map(t => t._id) } });
+      }
+      
+      if (toUpdate.length > 0) {
+        for (const t of toUpdate) {
+          if (title) t.title = title;
+          if (description !== undefined) t.description = description;
+          if (category) t.category = category;
+          if (priority) t.priority = priority;
+          if (tags !== undefined) t.tags = tags;
+          t.time = incomingDatesMap.get(t.date);
+          await t.save();
+        }
+      }
+      
+      if (toCreate.length > 0) {
+        await Task.insertMany(toCreate);
+      }
+    } else {
+      if (title) existingTask.title = title;
+      if (description !== undefined) existingTask.description = description;
+      if (category) existingTask.category = category;
+      if (priority) existingTask.priority = priority;
+      if (tags !== undefined) existingTask.tags = tags;
+      if (req.body.dueDate || req.body.date) existingTask.date = req.body.dueDate || req.body.date;
+      if (req.body.dueTime !== undefined || req.body.time !== undefined) existingTask.time = req.body.dueTime || req.body.time || '';
+      await existingTask.save();
+    }
 
-    return successResponse(res, { message: 'Task updated successfully', data: task });
+    await logActivity({ userId: req.user._id, action: 'TASK_UPDATED', description: `Updated task: ${existingTask.title}`, taskId: existingTask._id, req });
+    return successResponse(res, { message: 'Task updated successfully', data: existingTask });
   } catch (error) {
     next(error);
   }
@@ -177,35 +233,31 @@ const deleteTask = async (req, res, next) => {
   }
 };
 
+// DELETE /api/tasks/series/:seriesId
+const deleteSeries = async (req, res, next) => {
+  try {
+    const result = await Task.deleteMany({ seriesId: req.params.seriesId, userId: req.user._id });
+    await logActivity({ userId: req.user._id, action: 'TASK_DELETED', description: `Deleted task series`, req });
+    return successResponse(res, { message: `${result.deletedCount} tasks deleted` });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // PATCH /api/tasks/:id/complete
 const completeTask = async (req, res, next) => {
   try {
-    const { date } = req.body;
     const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getTodayString();
 
-    if (date && task.dates && task.dates.length > 0) {
-      if (date > todayStr) {
-        return errorResponse(res, { message: 'Cannot complete a task scheduled for a future date', statusCode: 400 });
-      }
-      const dateObj = task.dates.find(d => d.date === date);
-      if (dateObj) {
-        dateObj.completed = true;
-      }
-    } else if (task.dates && task.dates.length > 0) {
-      const hasFutureDates = task.dates.some(d => d.date > todayStr);
-      if (hasFutureDates) {
-        return errorResponse(res, { message: 'Cannot complete a task with future occurrences', statusCode: 400 });
-      }
-      task.dates.forEach(d => { d.completed = true; });
+    if (task.date > todayStr) {
+      return errorResponse(res, { message: 'Cannot complete a task scheduled for a future date', statusCode: 400 });
     }
-    
-    if (task.dates && task.dates.every(d => d.completed)) {
-      task.status = 'completed';
-      task.completedAt = new Date();
-    }
+
+    task.status = 'completed';
+    task.completedAt = new Date();
     await task.save();
 
     await logActivity({ userId: req.user._id, action: 'TASK_COMPLETED', description: `Completed task: ${task.title}`, taskId: task._id, req });
@@ -218,33 +270,20 @@ const completeTask = async (req, res, next) => {
 // PATCH /api/tasks/:id/pending
 const pendingTask = async (req, res, next) => {
   try {
-    const { date } = req.body;
     const task = await Task.findOne({ _id: req.params.id, userId: req.user._id });
     if (!task) return errorResponse(res, { message: 'Task not found', statusCode: 404 });
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getTodayString();
 
-    if (date && task.dates && task.dates.length > 0) {
-      if (date > todayStr) {
-        return errorResponse(res, { message: 'Cannot modify a task scheduled for a future date', statusCode: 400 });
-      }
-      const dateObj = task.dates.find(d => d.date === date);
-      if (dateObj) {
-        dateObj.completed = false;
-      }
-    } else if (task.dates && task.dates.length > 0) {
-      const hasFutureDates = task.dates.some(d => d.date > todayStr);
-      if (hasFutureDates) {
-        return errorResponse(res, { message: 'Cannot modify a task with future occurrences', statusCode: 400 });
-      }
-      task.dates.forEach(d => { d.completed = false; });
+    if (task.date > todayStr) {
+      return errorResponse(res, { message: 'Cannot modify a task scheduled for a future date', statusCode: 400 });
     }
-    
+
     task.status = 'non_completed';
     task.completedAt = null;
     await task.save();
     
-    return successResponse(res, { message: 'Task marked as pending', data: task });
+    return successResponse(res, { message: 'Task marked as non_completed', data: task });
   } catch (error) {
     next(error);
   }
@@ -289,8 +328,12 @@ const bulkCompleteTasks = async (req, res, next) => {
     if (!ids || !Array.isArray(ids) || ids.length === 0) {
       return errorResponse(res, { message: 'No task IDs provided', statusCode: 400 });
     }
+
+    const todayStr = getTodayString();
+    
+    // Only allow completing non-future tasks
     const result = await Task.updateMany(
-      { _id: { $in: ids }, userId: req.user._id },
+      { _id: { $in: ids }, userId: req.user._id, date: { $lte: todayStr } },
       { status: 'completed', completedAt: new Date() }
     );
     await logActivity({ userId: req.user._id, action: 'BULK_COMPLETE', description: `Bulk completed ${result.modifiedCount} tasks`, req });
@@ -300,4 +343,8 @@ const bulkCompleteTasks = async (req, res, next) => {
   }
 };
 
-module.exports = { getTasks, getTask, createTask, updateTask, deleteTask, completeTask, pendingTask, archiveTask, bulkDeleteTasks, bulkCompleteTasks };
+module.exports = { 
+  getTasks, getTask, getSeries, createTask, updateTask, deleteTask, deleteSeries,
+  completeTask, pendingTask, archiveTask, bulkDeleteTasks, bulkCompleteTasks 
+};
+

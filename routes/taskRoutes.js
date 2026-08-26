@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const {
-  getTasks, getTask, createTask, updateTask, deleteTask,
+  getTasks, getTask, getSeries, createTask, updateTask, deleteTask, deleteSeries,
   completeTask, pendingTask, archiveTask, bulkDeleteTasks, bulkCompleteTasks,
 } = require('../controllers/taskController');
 const { createTaskValidator, updateTaskValidator } = require('../validators/taskValidator');
@@ -14,6 +14,8 @@ router.get('/', getTasks);
 router.post('/', createTaskValidator, validate, createTask);
 router.post('/bulk-delete', bulkDeleteTasks);
 router.post('/bulk-complete', bulkCompleteTasks);
+router.get('/series/:seriesId', getSeries);
+router.delete('/series/:seriesId', deleteSeries);
 router.get('/:id', getTask);
 router.put('/:id', updateTaskValidator, validate, updateTask);
 router.delete('/:id', deleteTask);

@@ -1,13 +1,13 @@
 const Task = require('../models/Task');
 const { successResponse } = require('../utils/apiResponse');
 
-// Helper to format date as YYYY-MM-DD
+// Helper to format date as YYYY-MM-DD in local time
 const formatDate = (date) => {
   const d = new Date(date);
-  const month = '' + (d.getMonth() + 1);
-  const day = '' + d.getDate();
   const year = d.getFullYear();
-  return [year, month.padStart(2, '0'), day.padStart(2, '0')].join('-');
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 };
 
 // GET /api/reports
@@ -36,7 +36,7 @@ const getReports = async (req, res, next) => {
       const startOfWeek = new Date(now);
       startOfWeek.setDate(diff);
       startStr = formatDate(startOfWeek);
-      endStr = formatDate(now); // to current day
+      endStr = formatDate(now);
     } else if (period === 'last_week') {
       const day = now.getDay();
       const diffToLastWeekStart = now.getDate() - day + (day === 0 ? -6 : 1) - 7;
@@ -49,7 +49,6 @@ const getReports = async (req, res, next) => {
     } else if (period === 'this_month') {
       const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
       startStr = formatDate(startOfMonth);
-      // Usually you want current month up to now or end of month, let's just do end of month
       const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
       endStr = formatDate(endOfMonth);
     } else if (period === 'last_month') {
@@ -57,29 +56,30 @@ const getReports = async (req, res, next) => {
       const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0);
       startStr = formatDate(startOfLastMonth);
       endStr = formatDate(endOfLastMonth);
+    } else if (period === 'this_year' || period === 'yearly') {
+      const startOfYear = new Date(now.getFullYear(), 0, 1);
+      const endOfYear = new Date(now.getFullYear(), 11, 31);
+      startStr = formatDate(startOfYear);
+      endStr = formatDate(endOfYear);
     } else if (period === 'all_time') {
       startStr = '1970-01-01';
       endStr = '2100-01-01';
     } else {
-      // Default fallback
       startStr = formatDate(now);
       endStr = formatDate(now);
     }
 
-    // Aggregation pipeline to get day-by-day stats based on dates array
     const pipeline = [
-      { $match: { userId } },
-      { $unwind: '$dates' },
-      { $match: { 'dates.date': { $gte: startStr, $lte: endStr } } },
+      { $match: { userId, date: { $gte: startStr, $lte: endStr }, isArchived: false } },
       {
         $group: {
-          _id: '$dates.date',
+          _id: '$date',
           totalTasks: { $sum: 1 },
-          completedTasks: { $sum: { $cond: [{ $eq: ['$dates.completed', true] }, 1, 0] } },
-          nonCompletedTasks: { $sum: { $cond: [{ $eq: ['$dates.completed', false] }, 1, 0] } },
+          completedTasks: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          nonCompletedTasks: { $sum: { $cond: [{ $eq: ['$status', 'non_completed'] }, 1, 0] } },
         }
       },
-      { $sort: { _id: -1 } } // newest date first
+      { $sort: { _id: -1 } } 
     ];
 
     const dailyData = await Task.aggregate(pipeline);
@@ -96,7 +96,7 @@ const getReports = async (req, res, next) => {
       const completionPercentage = day.totalTasks > 0 ? Math.round((day.completedTasks / day.totalTasks) * 100) : 0;
       
       return {
-        date: day._id,
+        date: day._id, // format: YYYY-MM-DD
         totalTasks: day.totalTasks,
         completedTasks: day.completedTasks,
         nonCompletedTasks: day.nonCompletedTasks,
@@ -104,13 +104,38 @@ const getReports = async (req, res, next) => {
       };
     });
 
+    // Monthly breakdown for yearly view
+    let monthlyBreakdown = null;
+    if (period === 'this_year' || period === 'yearly') {
+      const monthlyData = {};
+      dailyReports.forEach(r => {
+        const monthPrefix = r.date.substring(0, 7); // YYYY-MM
+        if (!monthlyData[monthPrefix]) {
+          monthlyData[monthPrefix] = { total: 0, completed: 0, nonCompleted: 0 };
+        }
+        monthlyData[monthPrefix].total += r.totalTasks;
+        monthlyData[monthPrefix].completed += r.completedTasks;
+        monthlyData[monthPrefix].nonCompleted += r.nonCompletedTasks;
+      });
+      monthlyBreakdown = Object.keys(monthlyData).sort().map(m => {
+        const md = monthlyData[m];
+        return {
+          month: m,
+          total: md.total,
+          completed: md.completed,
+          nonCompleted: md.nonCompleted,
+          completionPercentage: md.total > 0 ? Math.round((md.completed / md.total) * 100) : 0
+        };
+      });
+    }
+
     const completionPercentage = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
-    // Fetch tasks that fall into this date range
     const taskDetails = await Task.find({
       userId,
-      'dates.date': { $gte: startStr, $lte: endStr }
-    }).sort({ createdAt: -1 }).lean();
+      date: { $gte: startStr, $lte: endStr },
+      isArchived: false
+    }).sort({ date: -1, createdAt: -1 }).lean();
 
     return successResponse(res, {
       data: {
@@ -119,8 +144,9 @@ const getReports = async (req, res, next) => {
         nonCompletedTasks,
         completionPercentage,
         dailyReports,
+        monthlyBreakdown,
         taskDetails,
-        period: { start: startStr, end: endStr }
+        period: { start: startStr, end: endStr, type: period }
       }
     });
   } catch (error) {
@@ -129,3 +155,4 @@ const getReports = async (req, res, next) => {
 };
 
 module.exports = { getReports };
+
