@@ -98,7 +98,7 @@ const getReports = async (req, res, next) => {
         userId,
         date: { $gte: startStr, $lte: endStr },
         isArchived: false
-      }).sort({ date: -1, createdAt: -1 }).lean()
+      }).sort({ date: 1, createdAt: 1 }).lean()
     ]);
 
     let totalTasks = 0;

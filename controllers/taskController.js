@@ -55,7 +55,7 @@ const getTasks = async (req, res, next) => {
     const filter = buildFilter(req.query, req.user._id);
 
     const sortField = ALLOWED_SORT_FIELDS.includes(req.query.sortBy) ? req.query.sortBy : 'createdAt';
-    const sortOrder = req.query.order === 'asc' ? 1 : -1;
+    const sortOrder = req.query.order === 'desc' ? -1 : 1;
 
     const [tasks, total] = await Promise.all([
       Task.find(filter).sort({ [sortField]: sortOrder }).skip(skip).limit(limit).lean(),

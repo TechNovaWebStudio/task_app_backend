@@ -67,7 +67,7 @@ const getDashboard = async (req, res, next) => {
       Task.countDocuments({ userId, status: 'completed', isArchived: false }),
       Task.countDocuments({ userId, status: 'non_completed', date: { $lt: todayStr }, isArchived: false }),
       Task.find({ userId, date: todayStr, isArchived: false })
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: 1 })
         .limit(50)
         .lean(),
       Task.countDocuments({ userId, date: todayStr, status: 'completed', isArchived: false }),
@@ -78,7 +78,7 @@ const getDashboard = async (req, res, next) => {
         status: 'non_completed',
         isArchived: false,
       })
-        .sort({ date: 1, createdAt: -1 })
+        .sort({ date: 1, createdAt: 1 })
         .limit(10)
         .lean(),
       Task.countDocuments({ userId, date: { $gte: lastMonthStartStr, $lte: lastMonthEndStr }, isArchived: false }),
