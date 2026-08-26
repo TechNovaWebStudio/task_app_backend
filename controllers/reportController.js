@@ -69,20 +69,37 @@ const getReports = async (req, res, next) => {
       endStr = formatDate(now);
     }
 
-    const pipeline = [
-      { $match: { userId, date: { $gte: startStr, $lte: endStr }, isArchived: false } },
-      {
-        $group: {
-          _id: '$date',
-          totalTasks: { $sum: 1 },
-          completedTasks: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-          nonCompletedTasks: { $sum: { $cond: [{ $eq: ['$status', 'non_completed'] }, 1, 0] } },
-        }
-      },
-      { $sort: { _id: -1 } } 
-    ];
-
-    const dailyData = await Task.aggregate(pipeline);
+    const [dailyData, categoryData, taskDetails] = await Promise.all([
+      Task.aggregate([
+        { $match: { userId, date: { $gte: startStr, $lte: endStr }, isArchived: false } },
+        {
+          $group: {
+            _id: '$date',
+            totalTasks: { $sum: 1 },
+            completedTasks: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+            nonCompletedTasks: { $sum: { $cond: [{ $eq: ['$status', 'non_completed'] }, 1, 0] } },
+          }
+        },
+        { $sort: { _id: -1 } }
+      ]),
+      Task.aggregate([
+        { $match: { userId, date: { $gte: startStr, $lte: endStr }, isArchived: false } },
+        {
+          $group: {
+            _id: '$category',
+            total: { $sum: 1 },
+            completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+            nonCompleted: { $sum: { $cond: [{ $eq: ['$status', 'non_completed'] }, 1, 0] } }
+          }
+        },
+        { $sort: { total: -1 } }
+      ]),
+      Task.find({
+        userId,
+        date: { $gte: startStr, $lte: endStr },
+        isArchived: false
+      }).sort({ date: -1, createdAt: -1 }).lean()
+    ]);
 
     let totalTasks = 0;
     let completedTasks = 0;
@@ -103,6 +120,14 @@ const getReports = async (req, res, next) => {
         completionPercentage
       };
     });
+
+    const categoryBreakdown = categoryData.map(c => ({
+      category: c._id || 'Personal',
+      total: c.total,
+      completed: c.completed,
+      nonCompleted: c.nonCompleted,
+      completionPercentage: c.total > 0 ? Math.round((c.completed / c.total) * 100) : 0
+    }));
 
     // Monthly breakdown for yearly view
     let monthlyBreakdown = null;
@@ -131,12 +156,6 @@ const getReports = async (req, res, next) => {
 
     const completionPercentage = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
 
-    const taskDetails = await Task.find({
-      userId,
-      date: { $gte: startStr, $lte: endStr },
-      isArchived: false
-    }).sort({ date: -1, createdAt: -1 }).lean();
-
     return successResponse(res, {
       data: {
         totalTasks,
@@ -145,6 +164,7 @@ const getReports = async (req, res, next) => {
         completionPercentage,
         dailyReports,
         monthlyBreakdown,
+        categoryBreakdown,
         taskDetails,
         period: { start: startStr, end: endStr, type: period }
       }
@@ -155,4 +175,3 @@ const getReports = async (req, res, next) => {
 };
 
 module.exports = { getReports };
-

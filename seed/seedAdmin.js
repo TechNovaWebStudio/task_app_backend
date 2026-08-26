@@ -15,16 +15,16 @@ const Notification = require('../models/Notification');
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/todo_app';
 
 const defaultCategories = [
-  { name: 'Work', color: '#7C3AED', icon: 'briefcase', isDefault: true },
-  { name: 'Personal', color: '#EC4899', icon: 'user', isDefault: true },
   { name: 'Study', color: '#3B82F6', icon: 'book', isDefault: true },
+  { name: 'Work', color: '#7C3AED', icon: 'briefcase', isDefault: true },
   { name: 'Health', color: '#10B981', icon: 'heart', isDefault: true },
+  { name: 'Fitness', color: '#F97316', icon: 'activity', isDefault: true },
+  { name: 'Personal', color: '#EC4899', icon: 'user', isDefault: true },
+  { name: 'Habits', color: '#8B5CF6', icon: 'check-square', isDefault: true },
   { name: 'Shopping', color: '#F59E0B', icon: 'shopping-cart', isDefault: true },
   { name: 'Finance', color: '#6366F1', icon: 'dollar-sign', isDefault: true },
-  { name: 'Meeting', color: '#EF4444', icon: 'users', isDefault: true },
-  { name: 'Travel', color: '#0EA5E9', icon: 'map', isDefault: true },
-  { name: 'Fitness', color: '#F97316', icon: 'activity', isDefault: true },
-  { name: 'Home', color: '#84CC16', icon: 'home', isDefault: true },
+  { name: 'Family', color: '#EF4444', icon: 'heart-handshake', isDefault: true },
+  { name: 'Other', color: '#6B7280', icon: 'more-horizontal', isDefault: true },
 ];
 
 const monthlyTaskData = [

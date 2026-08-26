@@ -41,6 +41,10 @@ const buildFilter = (query, userId) => {
     filter.status = query.status;
   }
 
+  if (query.category) {
+    filter.category = query.category;
+  }
+
   return filter;
 };
 
