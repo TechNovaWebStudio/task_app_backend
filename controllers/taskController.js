@@ -54,11 +54,17 @@ const getTasks = async (req, res, next) => {
     const { page, limit, skip } = getPagination(req.query);
     const filter = buildFilter(req.query, req.user._id);
 
-    const sortField = ALLOWED_SORT_FIELDS.includes(req.query.sortBy) ? req.query.sortBy : 'createdAt';
-    const sortOrder = req.query.order === 'desc' ? -1 : 1;
+    let sort;
+    if (req.query.sortBy && ALLOWED_SORT_FIELDS.includes(req.query.sortBy)) {
+      const sortOrder = req.query.order === 'desc' ? -1 : 1;
+      sort = { [req.query.sortBy]: sortOrder };
+    } else {
+      // Default: respect user-defined sortOrder, then fall back to creation order
+      sort = { sortOrder: 1, createdAt: 1 };
+    }
 
     const [tasks, total] = await Promise.all([
-      Task.find(filter).sort({ [sortField]: sortOrder }).skip(skip).limit(limit).lean(),
+      Task.find(filter).sort(sort).skip(skip).limit(limit).lean(),
       Task.countDocuments(filter),
     ]);
 
@@ -347,8 +353,45 @@ const bulkCompleteTasks = async (req, res, next) => {
   }
 };
 
+// PATCH /api/tasks/reorder
+const reorderTasks = async (req, res, next) => {
+  try {
+    const { tasks } = req.body;
+
+    if (!tasks || !Array.isArray(tasks) || tasks.length === 0) {
+      return errorResponse(res, { message: 'No task order data provided', statusCode: 400 });
+    }
+
+    // Validate all provided IDs belong to the authenticated user
+    const ids = tasks.map(t => t.id).filter(Boolean);
+    if (ids.length !== tasks.length) {
+      return errorResponse(res, { message: 'Invalid task data: each item must have an id', statusCode: 400 });
+    }
+
+    const ownedCount = await Task.countDocuments({ _id: { $in: ids }, userId: req.user._id });
+    if (ownedCount !== ids.length) {
+      return errorResponse(res, { message: 'One or more tasks not found or access denied', statusCode: 403 });
+    }
+
+    // Bulk update sortOrder values
+    await Promise.all(
+      tasks.map(({ id, sortOrder }) =>
+        Task.updateOne(
+          { _id: id, userId: req.user._id },
+          { $set: { sortOrder: Number(sortOrder) } }
+        )
+      )
+    );
+
+    return successResponse(res, { message: 'Task order saved successfully' });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = { 
   getTasks, getTask, getSeries, createTask, updateTask, deleteTask, deleteSeries,
-  completeTask, pendingTask, archiveTask, bulkDeleteTasks, bulkCompleteTasks 
+  completeTask, pendingTask, archiveTask, bulkDeleteTasks, bulkCompleteTasks,
+  reorderTasks,
 };
 

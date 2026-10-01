@@ -32,6 +32,7 @@ const taskSchema = new mongoose.Schema(
     completedAt: { type: Date },
     isArchived: { type: Boolean, default: false },
     assignee: { type: String, default: 'Admin' },
+    sortOrder: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
@@ -42,6 +43,7 @@ taskSchema.index({ userId: 1, priority: 1 });
 taskSchema.index({ userId: 1, category: 1 });
 taskSchema.index({ userId: 1, date: 1 });
 taskSchema.index({ userId: 1, createdAt: -1 });
+taskSchema.index({ userId: 1, date: 1, sortOrder: 1 }); // for sorted task list queries
 taskSchema.index({ title: 'text', description: 'text' });
 
 module.exports = mongoose.model('Task', taskSchema);
